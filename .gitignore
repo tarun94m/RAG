@@ -1,0 +1,9 @@
+node_modules
+.env
+dist
+
+backend/.env
+node_modules/
+dist/
+*/certs/*.pem
+docker-compose.override.yml

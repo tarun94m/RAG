@@ -1,0 +1,13 @@
+[
+  {
+    "question": "How many days do customers have to request a refund?",
+    "doc": "policy",
+    "contains": ["30 days", "thirty days"],
+    "answerContains": ["30"]
+  },
+  {
+    "question": "Who is the product owner for the mobile app?",
+    "contains": ["product owner"],
+    "answerContains": ["priya"]
+  }
+]
