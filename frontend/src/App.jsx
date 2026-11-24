@@ -61,11 +61,20 @@ const Markdown = ({ text }) => (
   <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown></div>
 );
 
+const ALLOWED = [".pdf", ".docx", ".csv", ".txt", ".md"];
+const extOf = (n) => n.slice(n.lastIndexOf(".")).toLowerCase();
+const dropLast = (m) => {
+  const c = [...m];
+  if (c.at(-1)?.role === "assistant") c.pop();
+  if (c.at(-1)?.role === "user") c.pop();
+  return c;
+};
+
 const SUGGESTIONS = [
   "Write a Python script that renames all files in a folder by date",
   "Create a Word document with a one-page project proposal template",
   "Make an Excel sheet to track monthly expenses",
-  "Explain how a hash map works, with a JavaScript example",
+  "Make a PowerPoint presentation about the benefits of remote work",
 ];
 
 export default function App() {
@@ -73,22 +82,34 @@ export default function App() {
   const [docs, setDocs] = useState([]);
   const [selected, setSelected] = useState([]); // empty = search all
   const [conversations, setConversations] = useState([]);
+  const [chatQuery, setChatQuery] = useState("");
   const [activeId, setActiveId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
+  const [files, setFiles] = useState([]); // pending attachments
+  const [editing, setEditing] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const [urlInput, setUrlInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
   const [config, setConfig] = useState({});
+  const [modelList, setModelList] = useState({ default: null, models: [] });
+  const [modelKey, setModelKey] = useState(() => {
+    try { return localStorage.getItem("model") || ""; } catch { return ""; }
+  });
   const [useDocs, setUseDocs] = useState(() => {
     try { return localStorage.getItem("useDocs") === "1"; } catch { return false; }
   });
   const [web, setWeb] = useState(() => {
     try { return localStorage.getItem("webSearch") === "1"; } catch { return false; }
   });
-  const [error, setError] = useState("");
   const fileRef = useRef();
+  const attachRef = useRef();
   const endRef = useRef();
+  const inputRef = useRef();
+  const abortRef = useRef(null);
 
   const loadDocs = () =>
     api("/api/documents")
@@ -97,27 +118,42 @@ export default function App() {
         setSelected((sel) => sel.filter((id) => d.some((x) => x.docId === id)));
       })
       .catch((e) => setError(e.message));
-  const loadConversations = () =>
-    api("/api/conversations").then(setConversations).catch((e) => setError(e.message));
+  const loadConversations = (q = chatQuery) =>
+    api(`/api/conversations?q=${encodeURIComponent(q)}`).then(setConversations).catch((e) => setError(e.message));
 
   useEffect(() => {
-    loadDocs(); loadConversations();
+    loadDocs();
     api("/api/config").then(setConfig).catch(() => {});
+    api("/api/models").then(setModelList).catch(() => {});
   }, []);
+  useEffect(() => {
+    const t = setTimeout(() => loadConversations(chatQuery), 250);
+    return () => clearTimeout(t);
+  }, [chatQuery]);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
-  const webOn = Boolean(config.webSearch?.enabled) && web;
-  const toggleDocs = (v) => {
-    setUseDocs(v);
-    try { localStorage.setItem("useDocs", v ? "1" : "0"); } catch { /* ignore */ }
-  };
-  const toggleWeb = (v) => {
-    setWeb(v);
-    try { localStorage.setItem("webSearch", v ? "1" : "0"); } catch { /* ignore */ }
-  };
+  // Grow the input box with its content (up to a cap, then scroll); shrink back when cleared.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
+  }, [input]);
 
-  const toggle = (id) =>
-    setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+  const store = (k, v) => { try { localStorage.setItem(k, v); } catch { /* ignore */ } };
+  const webOn = Boolean(config.webSearch?.enabled) && web;
+  const toggleDocs = (v) => { setUseDocs(v); store("useDocs", v ? "1" : "0"); };
+  const toggleWeb = (v) => { setWeb(v); store("webSearch", v ? "1" : "0"); };
+  const toggle = (id) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+
+  const keyOf = (m) => `${m.provider}|${m.model}`;
+  const chosen = modelList.models.find((m) => keyOf(m) === modelKey) || null; // null = server default
+  const selectValue = chosen ? keyOf(chosen) : modelList.default ? keyOf(modelList.default) : "";
+  const pickModel = (k) => {
+    const isDefault = modelList.default && k === keyOf(modelList.default);
+    setModelKey(isDefault ? "" : k);
+    store("model", isDefault ? "" : k);
+  };
 
   // ----- documents -----
   async function addFile(e) {
@@ -146,17 +182,25 @@ export default function App() {
     catch (err) { setError(err.message); }
   }
 
+  // ----- attachments (drag, paste or click) -----
+  function addFiles(list) {
+    const ok = [], bad = [];
+    for (const f of list) (ALLOWED.includes(extOf(f.name)) ? ok : bad).push(f);
+    if (bad.length) setError(`Unsupported file: ${bad.map((f) => f.name).join(", ")}. Use PDF, DOCX, CSV, TXT or MD.`);
+    if (ok.length) setFiles((prev) => [...prev, ...ok].slice(0, 5));
+  }
+
   // ----- conversations -----
   function newChat() {
     if (busy) return;
-    setActiveId(null); setMessages([]); setError("");
+    setActiveId(null); setMessages([]); setError(""); setEditing(false); setInput("");
   }
 
   async function openChat(id) {
     if (busy || id === activeId) return;
     try {
       const c = await api(`/api/conversations/${id}`);
-      setActiveId(id); setMessages(c.messages); setError("");
+      setActiveId(id); setMessages(c.messages); setError(""); setEditing(false);
     } catch (err) { setError(err.message); loadConversations(); }
   }
 
@@ -196,14 +240,44 @@ export default function App() {
     else if (event === "error") setError(payload.message);
   }
 
-  async function send(e) {
-    e.preventDefault();
-    const question = input.trim();
+  async function submit(text, { replaceLast = false, keepAttachments = [] } = {}) {
+    const question = text.trim();
     if (!question || busy) return;
-    setMessages((m) => [...m, { role: "user", content: question }, { role: "assistant", content: "", sources: [], files: [] }]);
-    setInput(""); setBusy(true); setError("");
+    setError(""); setBusy(true);
+    const ac = new AbortController();
+    abortRef.current = ac;
+    let added = false;
     try {
-      const res = await fetch("/api/chat", json("POST", { question, conversationId: activeId, docIds: selected, web: webOn, useDocs }));
+      // 1) index any attached files, then scope this question to them
+      const attached = [...keepAttachments];
+      for (const f of files) {
+        setStatus(`Indexing ${f.name}… (large files take a while on a local model)`);
+        const body = new FormData();
+        body.append("file", f);
+        const d = await api("/api/documents", { method: "POST", body, signal: ac.signal });
+        attached.push({ docId: d.docId, filename: d.filename });
+      }
+      if (files.length) { setFiles([]); loadDocs(); }
+      setStatus("");
+
+      // 2) ask
+      setMessages((m) => [
+        ...(replaceLast ? dropLast(m) : m),
+        { role: "user", content: question, attachments: attached },
+        { role: "assistant", content: "", sources: [], files: [] },
+      ]);
+      added = true;
+      setInput(""); setEditing(false);
+
+      const res = await fetch("/api/chat", {
+        ...json("POST", {
+          question, conversationId: activeId, docIds: selected, web: webOn, useDocs,
+          model: chosen ? { provider: chosen.provider, model: chosen.model } : null,
+          replaceLast: replaceLast && Boolean(activeId),
+          attachments: attached,
+        }),
+        signal: ac.signal,
+      });
       if (!res.ok || !res.body) {
         const d = await res.json().catch(() => ({}));
         throw new Error(d.error || `Request failed (${res.status})`);
@@ -220,10 +294,31 @@ export default function App() {
         parts.forEach(handleEvent);
       }
     } catch (err) {
-      setError(err.message);
-      setMessages((m) => (m[m.length - 1]?.content === "" ? m.slice(0, -2) : m));
-    } finally { setBusy(false); loadConversations(); }
+      if (err.name !== "AbortError") {
+        setError(err.message);
+        if (added) setMessages((m) => (m.at(-1)?.role === "assistant" && m.at(-1).content === "" ? m.slice(0, -2) : m));
+      }
+    } finally {
+      setBusy(false); setStatus(""); abortRef.current = null;
+      loadConversations();
+    }
   }
+
+  const stop = () => abortRef.current?.abort();
+  const lastUserIdx = messages.map((m) => m.role).lastIndexOf("user");
+  const lastAsstIdx = messages.map((m) => m.role).lastIndexOf("assistant");
+
+  function regenerate() {
+    const u = messages[lastUserIdx];
+    if (u) submit(u.content, { replaceLast: true, keepAttachments: u.attachments || [] });
+  }
+  function editLast() {
+    const u = messages[lastUserIdx];
+    if (!u) return;
+    setInput(u.content); setEditing(true);
+    inputRef.current?.focus();
+  }
+  const onSubmit = (e) => { e.preventDefault(); submit(input, { replaceLast: editing }); };
 
   const docScope = selected.length === 0
     ? "all your documents"
@@ -242,8 +337,9 @@ export default function App() {
         {tab === "chats" && (
           <>
             <button className="primary" onClick={newChat} disabled={busy}>New chat</button>
+            <input className="search" value={chatQuery} onChange={(e) => setChatQuery(e.target.value)} placeholder="Search chats" aria-label="Search chats" />
             <ul className="list">
-              {conversations.length === 0 && <li className="empty">No saved chats yet. Ask a question to start one.</li>}
+              {conversations.length === 0 && <li className="empty">{chatQuery ? "No chats match your search." : "No saved chats yet. Ask a question to start one."}</li>}
               {conversations.map((c) => (
                 <li key={c.id} className={c.id === activeId ? "active" : ""}>
                   <button className="row" onClick={() => openChat(c.id)} title={c.title}>{c.title}</button>
@@ -287,10 +383,21 @@ export default function App() {
         )}
       </aside>
 
-      <main className="chat">
+      <main
+        className="chat"
+        onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+        onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDragging(false); }}
+        onDrop={(e) => { e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files); }}
+      >
+        {dragging && <div className="dropzone">Drop files to attach (PDF, Word, CSV, text)</div>}
         <header className="bar">
           <span>{scope}</span>
           <div className="barright">
+            {modelList.models.length > 0 && (
+              <select className="modelpick" value={selectValue} onChange={(e) => pickModel(e.target.value)} disabled={busy} aria-label="Model" title="Model used for answers">
+                {modelList.models.map((m) => <option key={keyOf(m)} value={keyOf(m)}>{m.label}</option>)}
+              </select>
+            )}
             <label className="toggle" title="Answer from your uploaded documents. Turn off for general chat, coding and file creation.">
               <input type="checkbox" checked={useDocs} onChange={(e) => toggleDocs(e.target.checked)} />
               My documents
@@ -299,22 +406,28 @@ export default function App() {
               className={`toggle ${config.webSearch?.enabled ? "" : "off"}`}
               title={config.webSearch?.enabled ? "Also search the web for each question" : config.webSearch?.reason || "Web search is not configured"}
             >
-              <input
-                type="checkbox"
-                checked={webOn}
-                disabled={!config.webSearch?.enabled}
-                onChange={(e) => toggleWeb(e.target.checked)}
-              />
+              <input type="checkbox" checked={webOn} disabled={!config.webSearch?.enabled} onChange={(e) => toggleWeb(e.target.checked)} />
               Search the web
             </label>
+            {activeId && (
+              <details className="menu">
+                <summary>Export</summary>
+                <div>
+                  <a href={`/api/conversations/${activeId}/export?format=md`}>Markdown</a>
+                  <a href={`/api/conversations/${activeId}/export?format=pdf`}>PDF</a>
+                  <a href={`/api/conversations/${activeId}/export?format=docx`}>Word</a>
+                </div>
+              </details>
+            )}
             {messages.length > 0 && <button className="ghost" onClick={newChat} disabled={busy}>New chat</button>}
           </div>
         </header>
+
         <div className="thread">
           {messages.length === 0 && (
             <div className="intro">
               <h2>How can I help?</h2>
-              <p>Chat, search the web, write code, or ask for a Word, PDF or Excel file. Turn on “My documents” to answer from your uploads.</p>
+              <p>Chat, search the web, write code, or ask for a Word, PDF, Excel or PowerPoint file. Drag a file into the box to ask about it.</p>
               <div className="chips">
                 {SUGGESTIONS.map((t) => <button key={t} className="chip" onClick={() => setInput(t)}>{t}</button>)}
               </div>
@@ -322,6 +435,9 @@ export default function App() {
           )}
           {messages.map((m, i) => (
             <div key={i} className={`msg ${m.role}`}>
+              {m.role === "user" && m.attachments?.length > 0 && (
+                <div className="attachrow">{m.attachments.map((a) => <span key={a.docId} className="attach">{a.filename}</span>)}</div>
+              )}
               {m.role === "user" ? <p>{m.content}</p> : m.content ? <Markdown text={m.content} /> : <p className="thinking">Thinking… the first reply can take a minute on a local model.</p>}
               {m.files?.map((f) => (
                 <a key={f.id} className="filecard" href={`/api/files/${f.id}`} download={f.name}>
@@ -329,6 +445,8 @@ export default function App() {
                 </a>
               ))}
               {m.notice && <p className="notice">{m.notice}</p>}
+              {!busy && i === lastAsstIdx && m.content && <div className="msgtools"><button className="ghost" onClick={regenerate}>Regenerate</button></div>}
+              {!busy && i === lastUserIdx && <div className="msgtools"><button className="ghost" onClick={editLast}>Edit</button></div>}
               {m.sources?.length > 0 && (
                 <details>
                   <summary>{m.sources.length} sources</summary>
@@ -351,9 +469,44 @@ export default function App() {
           <div ref={endRef} />
         </div>
         {error && <div className="error" role="alert">{error}</div>}
-        <form onSubmit={send} className="composer">
-          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Ask anything, or say “make a Word doc about…”" aria-label="Question" />
-          <button className="primary" disabled={busy || !input.trim()}>Ask</button>
+
+        <form onSubmit={onSubmit} className="composer">
+          <div className="composer-main">
+            {editing && (
+              <div className="editing">Editing your last message; sending replaces it and its answer. <button type="button" className="link" onClick={() => { setEditing(false); setInput(""); }}>Cancel</button></div>
+            )}
+            {files.length > 0 && (
+              <div className="attachrow">
+                {files.map((f, i) => (
+                  <span key={`${f.name}-${i}`} className="attach">
+                    {f.name}
+                    <button type="button" aria-label={`Remove ${f.name}`} onClick={() => setFiles((p) => p.filter((_, j) => j !== i))}>×</button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="inputrow">
+              <button type="button" className="ghost" onClick={() => attachRef.current.click()} disabled={busy} title="Attach files">Attach</button>
+              <input ref={attachRef} type="file" multiple hidden accept=".pdf,.docx,.csv,.txt,.md" onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
+              <textarea
+                ref={inputRef}
+                rows={1}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onPaste={(e) => { if (e.clipboardData.files.length) { e.preventDefault(); addFiles(e.clipboardData.files); } }}
+                onKeyDown={(e) => {
+                  // Enter sends, Shift+Enter adds a new line (ignore Enter while an IME is composing)
+                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); onSubmit(e); }
+                }}
+                placeholder="Ask anything, or say “make a Word doc about…”  (Shift+Enter for a new line)"
+                aria-label="Question"
+              />
+              {busy
+                ? <button type="button" className="stop" onClick={stop}>Stop</button>
+                : <button className="primary" disabled={!input.trim()}>Ask</button>}
+            </div>
+            {status && <div className="status">{status}</div>}
+          </div>
         </form>
       </main>
     </div>

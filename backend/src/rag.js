@@ -1,4 +1,4 @@
-import { makeEmbeddings, makeChat } from "./models.js";
+import { makeEmbeddings, makeChat, defaultChatSpec } from "./models.js";
 import { PGVectorStore } from "@langchain/community/vectorstores/pgvector";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import { Document } from "@langchain/core/documents";
@@ -8,7 +8,13 @@ import { FORMAT_LABELS } from "./files.js";
 import { randomUUID } from "node:crypto";
 
 const { embeddings, dimensions } = await makeEmbeddings();
-const llm = await makeChat();
+const chats = new Map();
+async function chatFor(spec) {
+  const s = spec || defaultChatSpec();
+  const key = `${s.provider}:${s.model}`;
+  if (!chats.has(key)) chats.set(key, await makeChat(s));
+  return chats.get(key);
+}
 
 let store;
 export async function getStore() {
@@ -36,6 +42,9 @@ export async function getStore() {
 
 const CHUNK_SIZE = Number(process.env.CHUNK_SIZE || 1000);
 const CHUNK_OVERLAP = Number(process.env.CHUNK_OVERLAP || 150);
+const CONTEXT_TOKENS = (process.env.CHAT_PROVIDER || "ollama") === "ollama"
+  ? Number(process.env.OLLAMA_NUM_CTX || 8192)
+  : 100000;
 export const TOP_K = Number(process.env.TOP_K || 4);
 
 async function indexDocs(docs, { filename, url = null }) {
@@ -96,11 +105,11 @@ Today's date is ${today()}.`;
 const writerPrompt = (format) => `You are writing the content of a ${FORMAT_LABELS[format]} for the user. The app will turn your Markdown into the file.
 Output ONLY the document content in Markdown. No introduction, no closing remarks, and do not wrap the whole thing in a code fence.
 Start with one "# Title" line. Use "##" headings, bullet lists, and tables where they help.
-${format === "xlsx" || format === "csv" ? "Present the data as Markdown tables (a heading above each table names its sheet). Use plain numbers without currency symbols or thousands separators in numeric columns." : "Write a thorough, well-structured document with real content, not placeholders."}
+${format === "pptx" ? "Write a slide deck: one \"# Title\" line, then one short subtitle line. Then 6 to 10 slides, each as a \"## Slide title\" heading followed by 3 to 5 concise bullet points (under 12 words each). No long paragraphs." : format === "xlsx" || format === "csv" ? "Present the data as Markdown tables (a heading above each table names its sheet). Use plain numbers without currency symbols or thousands separators in numeric columns." : "Write a thorough, well-structured document with real content, not placeholders."}
 If context from documents or the web is provided, base the content on it. Today's date is ${today()}.`;
 
 // Turn a follow-up ("what about the second one?") into a standalone search query.
-async function rewriteQuestion(question, history) {
+async function rewriteQuestion(question, history, llm) {
   if (!history.length) return question;
   const transcript = history.slice(-6).map((m) => `${m.role}: ${m.content}`).join("\n");
   const res = await llm.invoke([
@@ -185,9 +194,10 @@ export function buildContext(top, webHits) {
 
 // opts: web (search the web), useDocs (retrieve from uploaded documents), format (write a file's content)
 export async function* askStream(question, history = [], docIds = [], opts = {}) {
-  const { web = false, useDocs = true, format = null } = opts;
+  const { web = false, useDocs = true, format = null, model = null, signal } = opts;
+  const llm = await chatFor(model);
   const needQuery = useDocs || web;
-  const query = needQuery ? await rewriteQuestion(question, history) : question;
+  const query = needQuery ? await rewriteQuestion(question, history, llm) : question;
 
   const [top, webResult] = await Promise.all([
     useDocs ? retrieve(query, docIds) : [],
@@ -220,14 +230,23 @@ export async function* askStream(question, history = [], docIds = [], opts = {})
 
   const base = format ? writerPrompt(format) : hasContext ? groundedPrompt() : generalPrompt();
   const system = hasContext ? `${base}\n\nContext:\n${buildContext(top, webHits)}` : base;
-  const messages = [
-    ["system", system],
-    ...history.slice(-10).map((m) => [m.role === "user" ? "human" : "ai", m.content]),
-    ["human", question],
-  ];
+  // Keep the prompt inside the model's context window. Ollama silently drops the *start* of an
+  // over-long prompt (which includes the instructions), so trim old chat history first and warn if
+  // the message itself is too big.
+  const budgetChars = Math.max(2000, (CONTEXT_TOKENS - 1024) * 3.5); // ~3.5 chars/token, 1024 tokens kept for the reply
+  const size = (ms) => ms.reduce((n, m) => n + m[1].length, 0);
+  const sys = ["system", system];
+  const human = ["human", question];
+  const hist = history.slice(-10).map((m) => [m.role === "user" ? "human" : "ai", m.content]);
+  while (hist.length && size([sys, ...hist, human]) > budgetChars) hist.shift();
+  if (size([sys, human]) > budgetChars) {
+    yield { type: "notice", data: { message: `Your message is very long (about ${Math.round(size([human]) / 3.5)} tokens) for the model's ${CONTEXT_TOKENS}-token window, so part of it may be ignored. Raise OLLAMA_NUM_CTX in backend/.env or shorten it.` } };
+  }
+  const messages = [sys, ...hist, human];
 
   let text = "";
-  for await (const chunk of await llm.stream(messages)) {
+  signal?.throwIfAborted();
+  for await (const chunk of await llm.stream(messages, { signal })) {
     if (typeof chunk.content === "string" && chunk.content) {
       text += chunk.content;
       yield { type: "token", data: chunk.content };

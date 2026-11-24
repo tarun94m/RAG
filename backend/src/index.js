@@ -7,13 +7,14 @@ import { askStream, ingestFile, ingestUrl, listDocuments, deleteDocument, getSto
 import * as db from "./db.js";
 import { webSearchStatus } from "./websearch.js";
 import { detectFileRequest, renderFile } from "./files.js";
+import { listModels } from "./models.js";
 
 const ALLOWED = new Set([".pdf", ".docx", ".csv", ".txt", ".md"]);
 const isUuid = (s) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 const upload = multer({ dest: "/tmp/uploads", limits: { fileSize: 25 * 1024 * 1024 } });
 
 const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
@@ -23,6 +24,7 @@ const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
 
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 app.get("/api/config", (_, res) => res.json({ webSearch: webSearchStatus() }));
+app.get("/api/models", wrap(async (_, res) => res.json(await listModels())));
 
 // ---------- documents ----------
 app.get("/api/documents", wrap(async (_, res) => res.json(await listDocuments())));
@@ -52,7 +54,7 @@ app.delete("/api/documents/:id", wrap(async (req, res) => {
 }));
 
 // ---------- conversations ----------
-app.get("/api/conversations", wrap(async (_, res) => res.json(await db.listConversations())));
+app.get("/api/conversations", wrap(async (req, res) => res.json(await db.listConversations(String(req.query.q || "")))));
 
 app.get("/api/conversations/:id", wrap(async (req, res) => {
   const c = isUuid(req.params.id) ? await db.getConversation(req.params.id) : null;
@@ -73,6 +75,19 @@ app.delete("/api/conversations/:id", wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+app.get("/api/conversations/:id/export", wrap(async (req, res) => {
+  const c = isUuid(req.params.id) ? await db.getConversation(req.params.id) : null;
+  if (!c) return res.status(404).json({ error: "Conversation not found" });
+  const format = ["md", "pdf", "docx"].includes(req.query.format) ? req.query.format : "md";
+  const md = `# ${c.title}\n\n` + c.messages.map((m) =>
+    `## ${m.role === "user" ? "You" : "Assistant"}\n\n${m.content}` +
+    (m.files?.length ? `\n\n_Files: ${m.files.map((f) => f.name).join(", ")}_` : "")
+  ).join("\n\n");
+  const f = await renderFile(format, md);
+  res.set({ "Content-Type": f.mime, "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(f.name)}` });
+  res.send(f.buffer);
+}));
+
 // ---------- generated files ----------
 app.get("/api/files/:id", wrap(async (req, res) => {
   const f = isUuid(req.params.id) ? await db.getFile(req.params.id) : null;
@@ -88,7 +103,10 @@ app.get("/api/files/:id", wrap(async (req, res) => {
 const titleFrom = (q) => (q.length > 60 ? `${q.slice(0, 57)}…` : q);
 
 app.post("/api/chat", async (req, res) => {
-  const { question, conversationId, docIds = [], web = false, useDocs = true } = req.body;
+  const {
+    question, conversationId, docIds = [], web = false, useDocs = true,
+    model = null, replaceLast = false, attachments = [],
+  } = req.body;
   if (!question?.trim()) return res.status(400).json({ error: "Question is required" });
   if (conversationId && !isUuid(conversationId)) return res.status(400).json({ error: "Invalid conversation" });
 
@@ -99,27 +117,53 @@ app.post("/api/chat", async (req, res) => {
     "X-Accel-Buffering": "no",
   });
   res.flushHeaders();
-  const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  const send = (event, data) => {
+    if (!res.writableEnded && !res.destroyed) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
 
+  // If the browser disconnects (Stop button), cancel the model call.
+  const ac = new AbortController();
+  res.on("close", () => { if (!res.writableEnded) ac.abort(); });
+
+  let convId = conversationId;
+  let answer = "";
+  let sources = [];
+  const files = [];
   try {
-    let convId = conversationId;
+    let spec = null;
+    if (model?.provider) {
+      spec = (await listModels()).models.find((m) => m.provider === model.provider && m.model === model.model);
+      if (!spec) throw Object.assign(new Error("That model isn't available."), { status: 400 });
+    }
+
     if (convId) {
       if (!(await db.getConversation(convId))) throw Object.assign(new Error("Conversation not found"), { status: 404 });
+      if (replaceLast) await db.popLastExchange(convId);
     } else {
       const c = await db.createConversation(titleFrom(question.trim()));
       convId = c.id;
       send("conversation", c);
     }
 
-    const history = await db.recentMessages(convId, 6);
-    await db.addMessage(convId, "user", question.trim());
+    const atts = (Array.isArray(attachments) ? attachments : [])
+      .filter((a) => isUuid(String(a?.docId)))
+      .slice(0, 5)
+      .map((a) => ({ docId: a.docId, filename: String(a.filename || "file").slice(0, 200) }));
 
-    let answer = "";
-    let sources = [];
-    const files = [];
+    const history = await db.recentMessages(convId, 10);
+    await db.addMessage(convId, "user", question.trim(), null, null, atts);
+
     const format = detectFileRequest(question);
-    const opts = { web: Boolean(web), useDocs: Boolean(useDocs), format };
-    for await (const ev of askStream(question.trim(), history, docIds, opts)) {
+    const opts = {
+      web: Boolean(web),
+      useDocs: atts.length ? true : Boolean(useDocs),
+      format,
+      model: spec,
+      signal: ac.signal,
+    };
+    const scope = atts.length ? atts.map((a) => a.docId) : docIds;
+
+    for await (const ev of askStream(question.trim(), history, scope, opts)) {
       if (ev.type === "token") answer += ev.data;
       if (ev.type === "sources") sources = ev.data;
       if (ev.type === "document") {
@@ -139,8 +183,13 @@ app.post("/api/chat", async (req, res) => {
     }
     await db.addMessage(convId, "assistant", answer, sources, files);
   } catch (e) {
-    console.error(e);
-    send("error", { message: e.message });
+    if (ac.signal.aborted) {
+      // Stopped by the person: keep what was written so far.
+      if (convId && answer.trim()) await db.addMessage(convId, "assistant", answer, sources, files).catch(() => {});
+    } else {
+      console.error(e);
+      send("error", { message: e.message });
+    }
   }
   res.end();
 });

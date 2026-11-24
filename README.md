@@ -24,6 +24,12 @@ Open http://localhost:3000
 
 ## Features
 
+- **Stop / Regenerate / Edit:** cancel a reply mid-way (the partial answer is kept), regenerate the last answer, or edit your last message and resend.
+- **Model picker:** switch between installed Ollama models and hosted models (Gemini, Claude, OpenAI) from a dropdown; hosted models appear when their API key is in `.env`.
+- **Attach files in the chat box:** drag, paste or click Attach; the file is indexed and the question is answered from it.
+- **PowerPoint (.pptx)** joins Word, PDF, Excel, CSV, HTML and Markdown as a file you can ask for.
+- **Chat tools:** search past chats, export a chat to Markdown, PDF or Word.
+
 - **General assistant:** chat, code (with Copy/Download on every code block), web search, and file creation. Turn on **My documents** to answer from your uploads instead.
 - **Create files by asking:** "make a Word document about…", "create a PDF report on…", "generate an Excel sheet of…". Supports Word, PDF, Excel, CSV, HTML, Markdown and text. Files are stored in Postgres and downloadable from the chat.
 

@@ -7,12 +7,14 @@ import {
 } from "docx";
 import PDFDocument from "pdfkit";
 import ExcelJS from "exceljs";
+import pptxgen from "pptxgenjs";
 
 // ---------- intent detection ----------
 const VERB = /\b(create|make|generate|write|draft|build|prepare|produce|compose|export|save|convert|turn|give|put)\b/i;
-const EXPLICIT_AS = /\b(as|into|in|to)\s+(a |an |the )?(ms |microsoft )?(pdf|word|docx|excel|xlsx|spreadsheet|csv)\b/i;
+const EXPLICIT_AS = /\b(as|into|in|to)\s+(a |an |the )?(ms |microsoft )?(pdf|word|docx|excel|xlsx|spreadsheet|csv|powerpoint|pptx)\b/i;
 const CODEY = /\b(script|code|function|program|python|javascript|typescript|node\.?js|java|api|library|module|regex|sql|class|react|bash|command)\b/i;
 const FORMATS = [
+  ["pptx", /\b(powerpoint|pptx|ppt|slide deck|slides|presentation)\b/i],
   ["pdf", /\bpdf\b/i],
   ["docx", /\bdocx\b|\bword\b.{0,12}\b(doc|document|file|report)\b|\b(as|in|into|to)\s+(a |an )?(ms |microsoft )?word\b/i],
   ["xlsx", /\b(excel|xlsx|spreadsheet)\b/i],
@@ -32,7 +34,7 @@ export function detectFileRequest(text) {
 }
 
 export const FORMAT_LABELS = {
-  docx: "Word document", pdf: "PDF document", xlsx: "Excel spreadsheet",
+  docx: "Word document", pptx: "PowerPoint presentation", pdf: "PDF document", xlsx: "Excel spreadsheet",
   csv: "CSV file", html: "HTML page", md: "Markdown file", txt: "text file",
 };
 
@@ -275,6 +277,78 @@ async function toPdf(md) {
   return Buffer.concat(chunks);
 }
 
+// ---------- PowerPoint ----------
+async function toPptx(md) {
+  const pres = new pptxgen();
+  pres.layout = "LAYOUT_16x9";
+  pres.title = titleOf(md);
+  const ACCENT = "1F5F5B";
+
+  // 1) group the markdown into slides: "# " = title slide, each "##" starts a content slide
+  const slides = [];
+  let cur = null, deckTitle = null;
+  const ensure = () => cur || (cur = (slides.push({ title: deckTitle || "Overview", items: [] }), slides[slides.length - 1]));
+  for (const t of marked.lexer(md)) {
+    if (t.type === "heading" && t.depth === 1 && !deckTitle) {
+      deckTitle = plain(t.tokens);
+      cur = { title: deckTitle, titleSlide: true, items: [] };
+      slides.push(cur);
+    } else if (t.type === "heading") {
+      cur = { title: plain(t.tokens), items: [] };
+      slides.push(cur);
+    } else if (t.type === "paragraph" || t.type === "text") {
+      ensure().items.push({ text: plain(inlineOf(t)), level: 0 });
+    } else if (t.type === "list") {
+      const walk = (l, level) => l.items.forEach((it) => it.tokens.forEach((sub) => {
+        if (sub.type === "list") walk(sub, level + 1);
+        else if (sub.type === "text" || sub.type === "paragraph") ensure().items.push({ text: plain(inlineOf(sub)), level, bullet: true });
+      }));
+      walk(t, 0);
+    } else if (t.type === "table") {
+      ensure().table = [t.header.map((c) => plain(c.tokens)), ...t.rows.map((r) => r.map((c) => plain(c.tokens)))];
+    } else if (t.type === "code") {
+      ensure().code = t.text;
+    }
+  }
+  if (!slides.length) slides.push({ title: deckTitle || "Presentation", items: [{ text: md.slice(0, 500), level: 0 }] });
+
+  // 2) draw them
+  for (const sd of slides) {
+    if (sd.titleSlide) {
+      const s = pres.addSlide();
+      s.background = { color: ACCENT };
+      s.addText(sd.title, { x: 0.7, y: 1.8, w: 8.6, h: 1.4, fontSize: 38, bold: true, color: "FFFFFF", fontFace: "Calibri" });
+      const sub = sd.items.map((i) => i.text).join(" ");
+      if (sub) s.addText(sub, { x: 0.7, y: 3.3, w: 8.6, h: 1, fontSize: 20, color: "D9ECE9", fontFace: "Calibri" });
+      continue;
+    }
+    const chunks = [];
+    for (let i = 0; i < sd.items.length; i += 7) chunks.push(sd.items.slice(i, i + 7));
+    if (!chunks.length) chunks.push([]);
+    chunks.forEach((items, idx) => {
+      const s = pres.addSlide();
+      s.addText(idx ? `${sd.title} (cont.)` : sd.title, { x: 0.5, y: 0.3, w: 9, h: 0.8, fontSize: 28, bold: true, color: ACCENT, fontFace: "Calibri" });
+      let y = 1.3;
+      if (items.length) {
+        s.addText(
+          items.map((i) => ({ text: i.text, options: { bullet: i.bullet !== false, indentLevel: i.level, breakLine: true } })),
+          { x: 0.6, y, w: 8.8, h: sd.table || sd.code ? 2 : 4, fontSize: 20, color: "222222", valign: "top", fontFace: "Calibri" }
+        );
+        y += sd.table || sd.code ? 2.1 : 0;
+      }
+      if (idx === chunks.length - 1 && sd.table) {
+        s.addTable(
+          sd.table.map((row, ri) => row.map((c) => ({ text: c, options: { bold: ri === 0, fill: ri === 0 ? { color: "E7E6E6" } : undefined } }))),
+          { x: 0.6, y, w: 8.8, fontSize: 14, border: { type: "solid", pt: 1, color: "999999" } }
+        );
+      } else if (idx === chunks.length - 1 && sd.code) {
+        s.addText(sd.code, { x: 0.6, y, w: 8.8, h: 2.5, fontSize: 13, fontFace: "Consolas", fill: { color: "F2F2F2" }, valign: "top" });
+      }
+    });
+  }
+  return Buffer.from(await pres.write({ outputType: "nodebuffer" }));
+}
+
 // ---------- Excel / CSV ----------
 const cellValue = (s) => (/^-?\d+(\.\d+)?$/.test(s.trim()) ? Number(s) : s);
 
@@ -343,6 +417,7 @@ function toHtml(md) {
 // ---------- entry point ----------
 const MIME = {
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   pdf: "application/pdf",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   csv: "text/csv; charset=utf-8",
@@ -356,6 +431,7 @@ export async function renderFile(format, markdown) {
   if (!md) throw new Error("The model returned no content to put in the file.");
   const buffer =
     format === "docx" ? await toDocx(md) :
+    format === "pptx" ? await toPptx(md) :
     format === "pdf" ? await toPdf(md) :
     format === "xlsx" ? await toXlsx(md) :
     format === "csv" ? toCsv(md) :

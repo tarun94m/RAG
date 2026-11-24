@@ -1,4 +1,4 @@
-﻿// Web search adapters. Pick one in .env:
+// Web search adapters. Pick one in .env:
 //   WEB_SEARCH_PROVIDER = tavily | brave | searxng
 //   TAVILY_API_KEY / BRAVE_API_KEY / SEARXNG_URL (e.g. http://localhost:8080)
 //   WEB_RESULTS = how many results to use (default 4)
@@ -59,7 +59,7 @@ async function enrich(results) {
       if (r.full) return r;
       try {
         const { docs } = await loadUrlDocs(r.url, 8000);
-        return { ...r, text: docs[0].pageContent.slice(0, 1200) };
+        return { ...r, text: docs[0].pageContent.slice(0, 3000) };
       } catch {
         return r;
       }
@@ -72,5 +72,5 @@ export async function webSearch(query) {
   if (!status.enabled) throw new Error(status.reason);
   const results = (await adapters[status.provider](query)).filter((r) => r.url && r.text);
   const enriched = await enrich(results.slice(0, N()));
-  return enriched.map((r) => ({ title: r.title || r.url, url: r.url, text: r.text.slice(0, 1200) }));
+  return enriched.map((r) => ({ title: r.title || r.url, url: r.url, text: r.text.slice(0, 3000) }));
 }
