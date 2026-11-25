@@ -26,6 +26,11 @@ export async function initChatTables() {
     data bytea NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
   )`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS projects (
+    conversation_id uuid PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    files jsonb NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
+  )`);
   await pool.query(`CREATE INDEX IF NOT EXISTS messages_conv ON messages (conversation_id, id)`);
 }
 
@@ -113,4 +118,17 @@ export async function popLastExchange(id) {
     if (rows[1]?.role === "user") ids.push(rows[1].id);
   } else if (rows[0]?.role === "user") ids.push(rows[0].id);
   if (ids.length) await pool.query(`DELETE FROM messages WHERE id = ANY($1)`, [ids]);
+}
+
+export async function getProject(conversationId) {
+  const { rows } = await pool.query(`SELECT files, updated_at AS "updatedAt" FROM projects WHERE conversation_id = $1`, [conversationId]);
+  return rows[0] || { files: [], updatedAt: null };
+}
+
+export async function saveProject(conversationId, files) {
+  await pool.query(
+    `INSERT INTO projects (conversation_id, files) VALUES ($1, $2)
+     ON CONFLICT (conversation_id) DO UPDATE SET files = EXCLUDED.files, updated_at = now()`,
+    [conversationId, JSON.stringify(files)]
+  );
 }

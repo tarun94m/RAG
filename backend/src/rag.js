@@ -5,6 +5,7 @@ import { Document } from "@langchain/core/documents";
 import { loadFileDocs, loadUrlDocs } from "./loaders.js";
 import { webSearch } from "./websearch.js";
 import { FORMAT_LABELS } from "./files.js";
+import { buildSystemPrompt } from "./projects.js";
 import { randomUUID } from "node:crypto";
 
 const { embeddings, dimensions } = await makeEmbeddings();
@@ -194,7 +195,7 @@ export function buildContext(top, webHits) {
 
 // opts: web (search the web), useDocs (retrieve from uploaded documents), format (write a file's content)
 export async function* askStream(question, history = [], docIds = [], opts = {}) {
-  const { web = false, useDocs = true, format = null, model = null, signal } = opts;
+  const { web = false, useDocs = true, format = null, model = null, signal, build = false, stack = "Auto", project = [] } = opts;
   const llm = await chatFor(model);
   const needQuery = useDocs || web;
   const query = needQuery ? await rewriteQuestion(question, history, llm) : question;
@@ -222,18 +223,20 @@ export async function* askStream(question, history = [], docIds = [], opts = {})
   };
 
   const hasContext = top.length > 0 || webHits.length > 0;
-  if (useDocs && !hasContext && !format) {
+  if (useDocs && !hasContext && !format && !build) {
     yield { type: "token", data: "I couldn't find anything relevant in your documents. Turn off “My documents” to chat without them." };
     yield { type: "done", data: {} };
     return;
   }
 
-  const base = format ? writerPrompt(format) : hasContext ? groundedPrompt() : generalPrompt();
+  const projectBudget = Math.max(1500, Math.floor((CONTEXT_TOKENS - 2500) * 3.5 * 0.5));
+  const base = build ? buildSystemPrompt(stack, project, projectBudget)
+    : format ? writerPrompt(format) : hasContext ? groundedPrompt() : generalPrompt();
   const system = hasContext ? `${base}\n\nContext:\n${buildContext(top, webHits)}` : base;
   // Keep the prompt inside the model's context window. Ollama silently drops the *start* of an
   // over-long prompt (which includes the instructions), so trim old chat history first and warn if
   // the message itself is too big.
-  const budgetChars = Math.max(2000, (CONTEXT_TOKENS - 1024) * 3.5); // ~3.5 chars/token, 1024 tokens kept for the reply
+  const budgetChars = Math.max(2000, (CONTEXT_TOKENS - (build ? 2500 : 1024)) * 3.5); // ~3.5 chars/token; room kept for the reply
   const size = (ms) => ms.reduce((n, m) => n + m[1].length, 0);
   const sys = ["system", system];
   const human = ["human", question];
@@ -253,5 +256,6 @@ export async function* askStream(question, history = [], docIds = [], opts = {})
     }
   }
   if (format) yield { type: "document", data: { format, markdown: text } };
+  if (build) yield { type: "build_text", data: text };
   yield { type: "done", data: {} };
 }

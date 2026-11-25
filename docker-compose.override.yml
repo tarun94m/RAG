@@ -1,4 +1,5 @@
 ﻿services:
   db:
+    restart: unless-stopped
     ports:
       - "5434:5432"

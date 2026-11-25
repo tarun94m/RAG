@@ -8,6 +8,7 @@ import * as db from "./db.js";
 import { webSearchStatus } from "./websearch.js";
 import { detectFileRequest, renderFile } from "./files.js";
 import { listModels } from "./models.js";
+import { parseFiles, mergeFiles, checkFiles, toZip, slug, STACKS } from "./projects.js";
 
 const ALLOWED = new Set([".pdf", ".docx", ".csv", ".txt", ".md"]);
 const isUuid = (s) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
@@ -25,6 +26,7 @@ const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 app.get("/api/config", (_, res) => res.json({ webSearch: webSearchStatus() }));
 app.get("/api/models", wrap(async (_, res) => res.json(await listModels())));
+app.get("/api/stacks", (_, res) => res.json(STACKS));
 
 // ---------- documents ----------
 app.get("/api/documents", wrap(async (_, res) => res.json(await listDocuments())));
@@ -88,6 +90,22 @@ app.get("/api/conversations/:id/export", wrap(async (req, res) => {
   res.send(f.buffer);
 }));
 
+// ---------- build mode: projects ----------
+app.get("/api/conversations/:id/project", wrap(async (req, res) => {
+  if (!isUuid(req.params.id)) return res.status(404).json({ error: "Conversation not found" });
+  res.json(await db.getProject(req.params.id));
+}));
+
+app.get("/api/conversations/:id/project.zip", wrap(async (req, res) => {
+  const c = isUuid(req.params.id) ? await db.getConversation(req.params.id) : null;
+  if (!c) return res.status(404).json({ error: "Conversation not found" });
+  const { files } = await db.getProject(req.params.id);
+  if (!files.length) return res.status(404).json({ error: "This chat has no project yet." });
+  const name = slug(c.title);
+  res.set({ "Content-Type": "application/zip", "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(name)}.zip` });
+  res.send(await toZip(files, name));
+}));
+
 // ---------- generated files ----------
 app.get("/api/files/:id", wrap(async (req, res) => {
   const f = isUuid(req.params.id) ? await db.getFile(req.params.id) : null;
@@ -105,7 +123,7 @@ const titleFrom = (q) => (q.length > 60 ? `${q.slice(0, 57)}…` : q);
 app.post("/api/chat", async (req, res) => {
   const {
     question, conversationId, docIds = [], web = false, useDocs = true,
-    model = null, replaceLast = false, attachments = [],
+    model = null, replaceLast = false, attachments = [], mode = "chat", stack = "Auto",
   } = req.body;
   if (!question?.trim()) return res.status(400).json({ error: "Question is required" });
   if (conversationId && !isUuid(conversationId)) return res.status(400).json({ error: "Invalid conversation" });
@@ -153,19 +171,39 @@ app.post("/api/chat", async (req, res) => {
     const history = await db.recentMessages(convId, 10);
     await db.addMessage(convId, "user", question.trim(), null, null, atts);
 
-    const format = detectFileRequest(question);
+    const build = mode === "build";
+    const format = build ? null : detectFileRequest(question);
+    const project = build ? (await db.getProject(convId)).files : [];
     const opts = {
       web: Boolean(web),
       useDocs: atts.length ? true : Boolean(useDocs),
       format,
       model: spec,
       signal: ac.signal,
+      build,
+      stack: STACKS.includes(stack) ? stack : "Auto",
+      project,
     };
     const scope = atts.length ? atts.map((a) => a.docId) : docIds;
 
     for await (const ev of askStream(question.trim(), history, scope, opts)) {
       if (ev.type === "token") answer += ev.data;
       if (ev.type === "sources") sources = ev.data;
+      if (ev.type === "build_text") {
+        try {
+          const merged = mergeFiles(project, parseFiles(ev.data));
+          const notes = [...merged.problems];
+          if (merged.incomplete.length) notes.push(`The reply was cut off, so ${merged.incomplete.join(", ")} may be incomplete. Ask me to "continue" or raise OLLAMA_NUM_CTX.`);
+          if (!merged.files.length) notes.push("No files were found in that reply. Try again, or use a larger model.");
+          const warnings = await checkFiles(merged.files);
+          if (merged.files.length) await db.saveProject(convId, merged.files);
+          send("project", { conversationId: convId, files: merged.files.map((f) => ({ path: f.path, size: f.content.length })), warnings, notes });
+        } catch (e) {
+          console.error(e);
+          send("notice", { message: `Couldn't save the project: ${e.message}` });
+        }
+        continue; // internal event
+      }
       if (ev.type === "document") {
         try {
           const f = await renderFile(ev.data.format, ev.data.markdown);

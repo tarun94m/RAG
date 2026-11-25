@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { buildPreview } from "./preview.js";
 
 const api = async (url, opts) => {
   const res = await fetch(url, opts);
@@ -70,6 +71,63 @@ const dropLast = (m) => {
   return c;
 };
 
+const BUILD_SUGGESTIONS = [
+  "A to-do list web app with local storage and a dark mode",
+  "A Python command-line tool that renames photos by their date",
+  "A Node.js REST API for a notes app with an in-memory store",
+  "A Go program that checks whether a list of websites is up",
+];
+
+function ProjectPanel({ project, conversationId, info, onClose }) {
+  const [sel, setSel] = useState(null);
+  const [view, setView] = useState("code");
+  const [copied, setCopied] = useState(false);
+  const files = project.files;
+  const preview = useMemo(() => buildPreview(files), [files]);
+  const current = files.find((f) => f.path === sel) || files[0];
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(current.content); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* ignore */ }
+  };
+  return (
+    <aside className="project">
+      <div className="projhead">
+        <strong>Project · {files.length} {files.length === 1 ? "file" : "files"}</strong>
+        <span>
+          <a className="ziplink" href={`/api/conversations/${conversationId}/project.zip`}>Download ZIP</a>
+          <button className="ghost" onClick={onClose} aria-label="Close project panel">Close</button>
+        </span>
+      </div>
+      {(info?.warnings?.length > 0 || info?.notes?.length > 0) && (
+        <ul className="projwarn">
+          {info.notes.map((n, i) => <li key={`n${i}`}>{n}</li>)}
+          {info.warnings.map((w, i) => <li key={`w${i}`}><b>{w.path}</b>: {w.message}</li>)}
+        </ul>
+      )}
+      <div className="projtabs">
+        <button className={view === "code" ? "on" : ""} onClick={() => setView("code")}>Code</button>
+        {preview && <button className={view === "preview" ? "on" : ""} onClick={() => setView("preview")}>Preview</button>}
+      </div>
+      {view === "preview" && preview ? (
+        <iframe className="preview" title="Preview" sandbox="allow-scripts" srcDoc={preview} />
+      ) : (
+        <div className="projbody">
+          <ul className="filelist">
+            {files.map((f) => (
+              <li key={f.path}>
+                <button className={f.path === current?.path ? "on" : ""} onClick={() => setSel(f.path)} title={f.path}>{f.path}</button>
+              </li>
+            ))}
+          </ul>
+          <div className="fileview">
+            <div className="codebar"><span>{current?.path}</span><button onClick={copy}>{copied ? "Copied" : "Copy"}</button></div>
+            <pre><code>{current?.content}</code></pre>
+          </div>
+        </div>
+      )}
+    </aside>
+  );
+}
+
 const SUGGESTIONS = [
   "Write a Python script that renames all files in a folder by date",
   "Create a Word document with a one-page project proposal template",
@@ -95,6 +153,12 @@ export default function App() {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [config, setConfig] = useState({});
+  const [mode, setMode] = useState(() => { try { return localStorage.getItem("mode") || "chat"; } catch { return "chat"; } });
+  const [stack, setStack] = useState(() => { try { return localStorage.getItem("stack") || "Auto"; } catch { return "Auto"; } });
+  const [stacks, setStacks] = useState(["Auto"]);
+  const [project, setProject] = useState(null);
+  const [projectInfo, setProjectInfo] = useState(null);
+  const [panelOpen, setPanelOpen] = useState(false);
   const [modelList, setModelList] = useState({ default: null, models: [] });
   const [modelKey, setModelKey] = useState(() => {
     try { return localStorage.getItem("model") || ""; } catch { return ""; }
@@ -125,6 +189,7 @@ export default function App() {
     loadDocs();
     api("/api/config").then(setConfig).catch(() => {});
     api("/api/models").then(setModelList).catch(() => {});
+    api("/api/stacks").then(setStacks).catch(() => {});
   }, []);
   useEffect(() => {
     const t = setTimeout(() => loadConversations(chatQuery), 250);
@@ -142,6 +207,12 @@ export default function App() {
 
   const store = (k, v) => { try { localStorage.setItem(k, v); } catch { /* ignore */ } };
   const webOn = Boolean(config.webSearch?.enabled) && web;
+  const pickMode = (v) => { setMode(v); store("mode", v); };
+  const pickStack = (v) => { setStack(v); store("stack", v); };
+  const loadProject = (id) =>
+    api(`/api/conversations/${id}/project`)
+      .then((p) => { setProject(p.files.length ? p : null); return p.files.length > 0; })
+      .catch(() => false);
   const toggleDocs = (v) => { setUseDocs(v); store("useDocs", v ? "1" : "0"); };
   const toggleWeb = (v) => { setWeb(v); store("webSearch", v ? "1" : "0"); };
   const toggle = (id) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
@@ -194,6 +265,7 @@ export default function App() {
   function newChat() {
     if (busy) return;
     setActiveId(null); setMessages([]); setError(""); setEditing(false); setInput("");
+    setProject(null); setProjectInfo(null); setPanelOpen(false);
   }
 
   async function openChat(id) {
@@ -201,6 +273,8 @@ export default function App() {
     try {
       const c = await api(`/api/conversations/${id}`);
       setActiveId(id); setMessages(c.messages); setError(""); setEditing(false);
+      setProjectInfo(null);
+      loadProject(id).then((has) => setPanelOpen(has));
     } catch (err) { setError(err.message); loadConversations(); }
   }
 
@@ -215,7 +289,7 @@ export default function App() {
     if (!window.confirm(`Delete "${c.title}"?`)) return;
     try {
       await api(`/api/conversations/${c.id}`, { method: "DELETE" });
-      if (c.id === activeId) { setActiveId(null); setMessages([]); }
+      if (c.id === activeId) { setActiveId(null); setMessages([]); setProject(null); setPanelOpen(false); }
       loadConversations();
     } catch (err) { setError(err.message); }
   }
@@ -233,6 +307,10 @@ export default function App() {
     if (!data) return;
     const payload = JSON.parse(data);
     if (event === "conversation") { setActiveId(payload.id); loadConversations(); }
+    else if (event === "project") {
+      setProjectInfo({ warnings: payload.warnings, notes: payload.notes });
+      loadProject(payload.conversationId).then((has) => setPanelOpen(has));
+    }
     else if (event === "notice") patchLast((m) => ({ ...m, notice: payload.message }));
     else if (event === "file") patchLast((m) => ({ ...m, files: [...(m.files || []), payload] }));
     else if (event === "sources") patchLast((m) => ({ ...m, sources: payload }));
@@ -275,6 +353,7 @@ export default function App() {
           model: chosen ? { provider: chosen.provider, model: chosen.model } : null,
           replaceLast: replaceLast && Boolean(activeId),
           attachments: attached,
+          mode, stack,
         }),
         signal: ac.signal,
       });
@@ -326,7 +405,7 @@ export default function App() {
   const scope = [useDocs ? `Using ${docScope}` : "General chat", webOn ? "web search on" : null].filter(Boolean).join(" · ");
 
   return (
-    <div className="app">
+    <div className={`app${project && panelOpen ? " withpanel" : ""}`}>
       <aside className="library">
         <h1>Ask your documents</h1>
         <div className="tabs" role="tablist">
@@ -409,6 +488,7 @@ export default function App() {
               <input type="checkbox" checked={webOn} disabled={!config.webSearch?.enabled} onChange={(e) => toggleWeb(e.target.checked)} />
               Search the web
             </label>
+            {project && !panelOpen && <button className="ghost" onClick={() => setPanelOpen(true)}>Open project</button>}
             {activeId && (
               <details className="menu">
                 <summary>Export</summary>
@@ -429,7 +509,7 @@ export default function App() {
               <h2>How can I help?</h2>
               <p>Chat, search the web, write code, or ask for a Word, PDF, Excel or PowerPoint file. Drag a file into the box to ask about it.</p>
               <div className="chips">
-                {SUGGESTIONS.map((t) => <button key={t} className="chip" onClick={() => setInput(t)}>{t}</button>)}
+                {(mode === "build" ? BUILD_SUGGESTIONS : SUGGESTIONS).map((t) => <button key={t} className="chip" onClick={() => setInput(t)}>{t}</button>)}
               </div>
             </div>
           )}
@@ -472,6 +552,20 @@ export default function App() {
 
         <form onSubmit={onSubmit} className="composer">
           <div className="composer-main">
+            <div className="modebar">
+              <div className="seg" role="group" aria-label="Mode">
+                <button type="button" className={mode === "chat" ? "on" : ""} onClick={() => pickMode("chat")}>Chat</button>
+                <button type="button" className={mode === "build" ? "on" : ""} onClick={() => pickMode("build")}>Build app</button>
+              </div>
+              {mode === "build" && (
+                <>
+                  <select value={stack} onChange={(e) => pickStack(e.target.value)} aria-label="Language or stack" title="Language or stack">
+                    {stacks.map((x) => <option key={x} value={x}>{x === "Auto" ? "Language: auto" : x}</option>)}
+                  </select>
+                  <span className="hint small">Building apps works best with a larger model.</span>
+                </>
+              )}
+            </div>
             {editing && (
               <div className="editing">Editing your last message; sending replaces it and its answer. <button type="button" className="link" onClick={() => { setEditing(false); setInput(""); }}>Cancel</button></div>
             )}
@@ -498,7 +592,7 @@ export default function App() {
                   // Enter sends, Shift+Enter adds a new line (ignore Enter while an IME is composing)
                   if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); onSubmit(e); }
                 }}
-                placeholder="Ask anything, or say “make a Word doc about…”  (Shift+Enter for a new line)"
+                placeholder={mode === "build" ? "Describe the app you want, or the change to make… (Shift+Enter for a new line)" : "Ask anything, or say “make a Word doc about…”  (Shift+Enter for a new line)"}
                 aria-label="Question"
               />
               {busy
@@ -509,6 +603,9 @@ export default function App() {
           </div>
         </form>
       </main>
+      {project && panelOpen && (
+        <ProjectPanel project={project} conversationId={activeId} info={projectInfo} onClose={() => setPanelOpen(false)} />
+      )}
     </div>
   );
 }

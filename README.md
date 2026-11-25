@@ -24,6 +24,8 @@ Open http://localhost:3000
 
 ## Features
 
+- **Build apps:** switch to **Build app**, pick a language (or Auto), and describe what you want. The model writes a complete multi-file project (Python, JavaScript/Node, TypeScript, React, Java, C#, Go, Rust, C++, PHP, Ruby, Kotlin, Swift, or plain web). The project is saved per chat; ask for changes and only the affected files are updated. A side panel shows the files, runs a sandboxed live preview for web apps, flags JavaScript/JSON syntax errors, and downloads everything as a ZIP. Code is never executed by the server.
+
 - **Stop / Regenerate / Edit:** cancel a reply mid-way (the partial answer is kept), regenerate the last answer, or edit your last message and resend.
 - **Model picker:** switch between installed Ollama models and hosted models (Gemini, Claude, OpenAI) from a dropdown; hosted models appear when their API key is in `.env`.
 - **Attach files in the chat box:** drag, paste or click Attach; the file is indexed and the question is answered from it.

@@ -119,3 +119,30 @@ details a { color: var(--accent); }
 .menu a:hover { background: var(--panel); }
 .bar { flex-wrap: wrap; gap: 8px; }
 .barright { flex-wrap: wrap; }
+
+.app.withpanel { grid-template-columns: 320px minmax(0, 1fr) minmax(380px, 42%); }
+.modebar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { background: none; color: var(--muted); border-radius: 0; padding: 4px 12px; font-size: 13px; }
+.seg button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.modebar select { padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--paper); color: inherit; font: inherit; font-size: 13px; }
+.project { display: flex; flex-direction: column; min-width: 0; height: 100vh; border-left: 1px solid var(--line); background: var(--panel); }
+.projhead { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.projhead span { display: inline-flex; align-items: center; gap: 8px; }
+.ziplink { background: var(--accent); color: var(--accent-ink); padding: 5px 12px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 13px; }
+.projwarn { margin: 0; padding: 8px 14px 8px 30px; font-size: 13px; color: var(--danger); border-bottom: 1px solid var(--line); }
+.projtabs { display: flex; gap: 4px; padding: 6px 10px 0; border-bottom: 1px solid var(--line); }
+.projtabs button { background: none; color: var(--muted); border-radius: 8px 8px 0 0; padding: 6px 12px; border-bottom: 2px solid transparent; }
+.projtabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
+.projbody { flex: 1; display: grid; grid-template-columns: 170px minmax(0, 1fr); min-height: 0; }
+.filelist { list-style: none; margin: 0; padding: 6px; overflow-y: auto; border-right: 1px solid var(--line); }
+.filelist button { width: 100%; text-align: left; background: none; color: var(--ink); padding: 5px 8px; font-size: 13px; border-radius: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, monospace; }
+.filelist button.on, .filelist button:hover { background: var(--line); }
+.fileview { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--paper); }
+.fileview pre { flex: 1; margin: 0; padding: 12px; overflow: auto; font-size: 13px; }
+.fileview code { font-family: Consolas, monospace; }
+.preview { flex: 1; width: 100%; border: 0; background: #fff; }
+@media (max-width: 1100px) {
+  .app.withpanel { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; height: auto; }
+  .project { height: 70vh; border-left: 0; border-top: 1px solid var(--line); }
+}
