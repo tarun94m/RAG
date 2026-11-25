@@ -60,7 +60,3 @@ cd frontend && npm i && npm run dev     # http://localhost:5173
 ## Swapping models
 
 Edit `backend/src/rag.js`. For example, use `@langchain/ollama` (`OllamaEmbeddings`, `ChatOllama`) for fully local runs, and update `dimensions` to the embedding model's size (e.g. 768 for nomic-embed-text). Drop the `chunks` table if you change dimensions.
-
-## Next steps
-
-Auth and per-user documents, saved conversations, DOCX/URL ingestion, evaluation set, tracing.
